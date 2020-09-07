@@ -1,20 +1,14 @@
-require('tencent-component-monitor')
-const fs = require('fs')
 const path = require('path')
 const { createServer, proxy } = require('tencent-serverless-http')
+const userSls = path.join(__dirname, '..', 'sls.js')
+const getApp = require(userSls)
 
 let server
 
 exports.handler = async (event, context) => {
-  const userSls = path.join(__dirname, '..', 'sls.js')
-  let app
-  if (fs.existsSync(userSls)) {
-    // load the user provided app
-    app = require(userSls)
-  } else {
-    // load the built-in default app
-    app = require('./sls.js')
-  }
+  const nestApp = await getApp()
+  await nestApp.init()
+  const app = nestApp.getHttpAdapter().getInstance()
 
   // attach event and context to request
   app.request.__SLS_EVENT__ = event
@@ -25,14 +19,13 @@ exports.handler = async (event, context) => {
     server = createServer(app, null, app.binaryTypes || [])
   }
 
-  context.callbackWaitsForEmptyEventLoop =
-    app.callbackWaitsForEmptyEventLoop === true ? true : false
+  context.callbackWaitsForEmptyEventLoop = app.callbackWaitsForEmptyEventLoop === true
 
   // provide sls intialize hooks
   if (app.slsInitialize && typeof app.slsInitialize === 'function') {
     await app.slsInitialize()
   }
 
-  const result = await proxy(server, event, context, 'PROMISE')
-  return result.promise
+  const { promise } = await proxy(server, event, context, 'PROMISE')
+  return promise
 }

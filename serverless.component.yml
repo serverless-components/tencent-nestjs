@@ -1,10 +1,11 @@
 name: nestjs
-version: dev
+version: 0.1.0
 author: Tencent Cloud, Inc.
 org: Tencent Cloud, Inc.
-description: Deploys a serverless Nest.js application onto Tencent SCF and Tencent APIGateway.
+description: Deploy a serverless Nest.js application onto Tencent SCF and APIGateway.
 keywords: tencent, serverless, nestjs
 repo: https://github.com/serverless-components/tencent-nestjs
-readme: https://github.com/serverless-components/tencent-nestjs/README.md
+readme: https://github.com/serverless-components/tencent-nestjs/tree/master/README.md
 license: MIT
 main: ./src
+webDeployable: true

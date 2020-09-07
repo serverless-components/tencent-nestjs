@@ -1,17 +1,17 @@
 const { Component } = require('@serverless/core')
-const { MultiApigw, Scf, Apigw, Cns, Cam, Metrics } = require('tencent-component-toolkit')
+const { Scf, Apigw, Cns, Cam, Metrics } = require('tencent-component-toolkit')
 const { TypeError } = require('tencent-component-toolkit/src/utils/error')
-const { uploadCodeToCos, getDefaultProtocol, deleteRecord, prepareInputs } = require('./utils')
+const { deepClone, uploadCodeToCos, getDefaultProtocol, prepareInputs } = require('./utils')
 const CONFIGS = require('./config')
 
-class ServerlessComponent extends Component {
+class ServerlessComopnent extends Component {
   getCredentials() {
     const { tmpSecrets } = this.credentials.tencent
 
     if (!tmpSecrets || !tmpSecrets.TmpSecretId) {
       throw new TypeError(
         'CREDENTIAL',
-        'Cannot get secretId/Key, your account could be sub-account or does not have access, please check if SLS_QcsRole role exists in your account, and visit https://console.cloud.tencent.com/cam to bind this role to your account.'
+        'Cannot get secretId/Key, your account could be sub-account and does not have the access to use SLS_QcsRole, please make sure the role exists first, then visit https://cloud.tencent.com/document/product/1154/43006, follow the instructions to bind the role to your account.'
       )
     }
 
@@ -39,125 +39,152 @@ class ServerlessComponent extends Component {
       }
     }
 
-    const uploadCodeHandler = []
     const outputs = {}
     const appId = this.getAppId()
 
-    for (let eveRegionIndex = 0; eveRegionIndex < regionList.length; eveRegionIndex++) {
-      const curRegion = regionList[eveRegionIndex]
-      const funcDeployer = async () => {
-        const code = await uploadCodeToCos(this, appId, credentials, inputs, curRegion)
-        const scf = new Scf(credentials, curRegion)
-        const tempInputs = {
-          ...inputs,
-          code
-        }
-        const scfOutput = await scf.deploy(tempInputs)
-        outputs[curRegion] = {
-          functionName: scfOutput.FunctionName,
-          runtime: scfOutput.Runtime,
-          namespace: scfOutput.Namespace
-        }
-
-        this.state[curRegion] = {
-          ...(this.state[curRegion] ? this.state[curRegion] : {}),
-          ...outputs[curRegion]
-        }
+    const funcDeployer = async (curRegion) => {
+      const code = await uploadCodeToCos(this, appId, credentials, inputs, curRegion)
+      const scf = new Scf(credentials, curRegion)
+      const tempInputs = {
+        ...inputs,
+        code
       }
-      uploadCodeHandler.push(funcDeployer())
+      const scfOutput = await scf.deploy(deepClone(tempInputs))
+      outputs[curRegion] = {
+        functionName: scfOutput.FunctionName,
+        runtime: scfOutput.Runtime,
+        namespace: scfOutput.Namespace
+      }
+
+      this.state[curRegion] = {
+        ...(this.state[curRegion] ? this.state[curRegion] : {}),
+        ...outputs[curRegion]
+      }
+
+      // default version is $LATEST
+      outputs[curRegion].lastVersion = scfOutput.LastVersion
+        ? scfOutput.LastVersion
+        : this.state.lastVersion || '$LATEST'
+
+      // default traffic is 1.0, it can also be 0, so we should compare to undefined
+      outputs[curRegion].traffic =
+        scfOutput.Traffic !== undefined
+          ? scfOutput.Traffic
+          : this.state.traffic !== undefined
+          ? this.state.traffic
+          : 1
+
+      if (outputs[curRegion].traffic !== 1 && scfOutput.ConfigTrafficVersion) {
+        outputs[curRegion].configTrafficVersion = scfOutput.ConfigTrafficVersion
+        this.state.configTrafficVersion = scfOutput.ConfigTrafficVersion
+      }
+
+      this.state.lastVersion = outputs[curRegion].lastVersion
+      this.state.traffic = outputs[curRegion].traffic
     }
-    await Promise.all(uploadCodeHandler)
+
+    for (let i = 0; i < regionList.length; i++) {
+      const curRegion = regionList[i]
+      await funcDeployer(curRegion)
+    }
     this.save()
     return outputs
+  }
+
+  // try to add dns record
+  async tryToAddDnsRecord(credentials, customDomains) {
+    try {
+      const cns = new Cns(credentials)
+      for (let i = 0; i < customDomains.length; i++) {
+        const item = customDomains[i]
+        if (item.domainPrefix) {
+          await cns.deploy({
+            domain: item.subDomain.replace(`${item.domainPrefix}.`, ''),
+            records: [
+              {
+                subDomain: item.domainPrefix,
+                recordType: 'CNAME',
+                recordLine: '默认',
+                value: item.cname,
+                ttl: 600,
+                mx: 10,
+                status: 'enable'
+              }
+            ]
+          })
+        }
+      }
+    } catch (e) {
+      console.log('METHOD_tryToAddDnsRecord', e.message)
+    }
   }
 
   async deployApigateway(credentials, inputs, regionList) {
     if (inputs.isDisabled) {
       return {}
     }
-    const apigw = new MultiApigw(credentials, regionList)
-    const oldState = this.state[regionList[0]] || {}
-    inputs.oldState = {
-      apiList: oldState.apiList || [],
-      customDomains: oldState.customDomains || []
-    }
-    const apigwOutputs = await apigw.deploy(inputs)
-    const outputs = {}
-    Object.keys(apigwOutputs).forEach((curRegion) => {
-      const curOutput = apigwOutputs[curRegion]
-      outputs[curRegion] = {
-        serviceId: curOutput.serviceId,
-        subDomain: curOutput.subDomain,
-        environment: curOutput.environment,
-        url: `${getDefaultProtocol(inputs.protocols)}://${curOutput.subDomain}/${
-          curOutput.environment
-        }/`
-      }
-      if (curOutput.customDomains) {
-        outputs[curRegion].customDomains = curOutput.customDomains
-      }
-      this.state[curRegion] = {
-        created: curOutput.created,
-        ...(this.state[curRegion] ? this.state[curRegion] : {}),
-        ...outputs[curRegion],
-        apiList: curOutput.apiList
-      }
-    })
-    this.save()
-    return outputs
-  }
 
-  async deployCns(credentials, inputs, regionList, apigwOutputs) {
-    const cns = new Cns(credentials)
-    const cnsRegion = {}
+    const getServiceId = (instance, region) => {
+      const regionState = instance.state[region]
+      return inputs.serviceId || (regionState && regionState.serviceId)
+    }
+
+    const deployTasks = []
+    const outputs = {}
     regionList.forEach((curRegion) => {
-      const curApigwOutput = apigwOutputs[curRegion]
-      cnsRegion[curRegion] = curApigwOutput.subDomain
-    })
+      const apigwDeployer = async () => {
+        const apigw = new Apigw(credentials, curRegion)
 
-    const state = []
-    const outputs = {}
-    const tempJson = {}
-    for (let i = 0; i < inputs.length; i++) {
-      const curCns = inputs[i]
-      for (let j = 0; j < curCns.records.length; j++) {
-        curCns.records[j].value =
-          cnsRegion[curCns.records[j].value.replace('temp_value_about_', '')]
-      }
-      const tencentCnsOutputs = await cns.deploy(curCns)
-      outputs[curCns.domain] = tencentCnsOutputs.DNS
-        ? tencentCnsOutputs.DNS
-        : 'The domain name has already been added.'
-      tencentCnsOutputs.domain = curCns.domain
-      state.push(tencentCnsOutputs)
-    }
+        const oldState = this.state[curRegion] || {}
+        const apigwInputs = {
+          ...inputs,
+          oldState: {
+            apiList: oldState.apiList || [],
+            customDomains: oldState.customDomains || []
+          }
+        }
+        // different region deployment has different service id
+        apigwInputs.serviceId = getServiceId(this, curRegion)
+        const apigwOutput = await apigw.deploy(deepClone(apigwInputs))
+        outputs[curRegion] = {
+          serviceId: apigwOutput.serviceId,
+          subDomain: apigwOutput.subDomain,
+          environment: apigwOutput.environment,
+          url: `${getDefaultProtocol(inputs.protocols)}://${apigwOutput.subDomain}/${
+            apigwOutput.environment
+          }/`
+        }
 
-    // 删除serverless创建的但是不在本次列表中
-    try {
-      for (let i = 0; i < state.length; i++) {
-        tempJson[state[i].domain] = state[i].records
-      }
-      const recordHistory = this.state.cns || []
-      for (let i = 0; i < recordHistory.length; i++) {
-        const delList = deleteRecord(tempJson[recordHistory[i].domain], recordHistory[i].records)
-        if (delList && delList.length > 0) {
-          await cns.remove({ deleteList: delList })
+        if (apigwOutput.customDomains) {
+          // TODO: need confirm add cns authentication
+          if (inputs.autoAddDnsRecord === true) {
+            // await this.tryToAddDnsRecord(credentials, apigwOutput.customDomains)
+          }
+          outputs[curRegion].customDomains = apigwOutput.customDomains
+        }
+        this.state[curRegion] = {
+          created: true,
+          ...(this.state[curRegion] ? this.state[curRegion] : {}),
+          ...outputs[curRegion],
+          apiList: apigwOutput.apiList
         }
       }
-    } catch (e) {}
+      deployTasks.push(apigwDeployer())
+    })
 
-    this.state['cns'] = state
+    await Promise.all(deployTasks)
+
     this.save()
     return outputs
   }
 
   async deploy(inputs) {
-    console.log(`Deploying ${CONFIGS.frameworkFullname} App...`)
+    console.log(`Deploying ${CONFIGS.compFullname} App`)
 
     const credentials = this.getCredentials()
 
     // 对Inputs内容进行标准化
-    const { regionList, functionConf, apigatewayConf, cnsConf } = await prepareInputs(
+    const { regionList, functionConf, apigatewayConf } = await prepareInputs(
       this,
       credentials,
       inputs
@@ -189,20 +216,16 @@ class ServerlessComponent extends Component {
       outputs['scf'] = functionOutputs
     }
 
-    // cns depends on apigw, so if disabled apigw, just ignore it.
-    if (cnsConf.length > 0 && apigatewayConf.isDisabled !== true) {
-      outputs['cns'] = await this.deployCns(credentials, cnsConf, regionList, apigwOutputs)
-    }
-
     this.state.region = regionList[0]
     this.state.regionList = regionList
+
     this.state.lambdaArn = functionConf.name
 
     return outputs
   }
 
   async remove() {
-    console.log(`Removing ${CONFIGS.frameworkFullname} App...`)
+    console.log(`Removing ${CONFIGS.compFullname} App`)
 
     const { state } = this
     const { regionList = [] } = state
@@ -236,24 +259,23 @@ class ServerlessComponent extends Component {
 
     await Promise.all(removeHandlers)
 
-    if (this.state.cns) {
-      const cns = new Cns(credentials)
-      for (let i = 0; i < this.state.cns.length; i++) {
-        await cns.remove({ deleteList: this.state.cns[i].records })
-      }
-    }
-
     this.state = {}
   }
 
   async metrics(inputs = {}) {
-    console.log(`Get ${CONFIGS.frameworkFullname} Metrics Datas...`)
+    console.log(`Get ${CONFIGS.compFullname} Metrics Datas`)
     if (!inputs.rangeStart || !inputs.rangeEnd) {
-      throw new TypeError('PARAMETER_METRICS', 'rangeStart and rangeEnd are require inputs')
+      throw new TypeError(
+        `PARAMETER_${CONFIGS.compName.toUpperCase()}_METRICS`,
+        'rangeStart and rangeEnd are require inputs'
+      )
     }
     const { region } = this.state
     if (!region) {
-      throw new TypeError('PARAMETER_METRICS', 'No region property in state')
+      throw new TypeError(
+        `PARAMETER_${CONFIGS.compName.toUpperCase()}_METRICS`,
+        'No region property in state'
+      )
     }
     const { functionName, namespace, functionVersion } = this.state[region] || {}
     if (functionName) {
@@ -264,6 +286,11 @@ class ServerlessComponent extends Component {
         region,
         timezone: inputs.tz
       }
+      const curState = this.state[region]
+      if (curState.serviceId) {
+        options.apigwServiceId = curState.serviceId
+        options.apigwEnvironment = curState.environment || 'release'
+      }
       const credentials = this.getCredentials()
       const mertics = new Metrics(credentials, options)
       const metricResults = await mertics.getDatas(
@@ -273,8 +300,11 @@ class ServerlessComponent extends Component {
       )
       return metricResults
     }
-    throw new Error('function name not define')
+    throw new TypeError(
+      `PARAMETER_${CONFIGS.compName.toUpperCase()}_METRICS`,
+      'Function name not define'
+    )
   }
 }
 
-module.exports = ServerlessComponent
+module.exports = ServerlessComopnent

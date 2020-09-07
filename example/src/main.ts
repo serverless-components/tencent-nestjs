@@ -1,41 +1,25 @@
 import { NestFactory } from '@nestjs/core';
-import {
-  NestExpressApplication,
-  ExpressAdapter,
-} from '@nestjs/platform-express';
+import { NestExpressApplication } from '@nestjs/platform-express';
 import { join } from 'path';
-import * as express from 'express';
 import { AppModule } from './app.module';
 
-//
-const createServerlessApp = async (): Promise<NestExpressApplication> => {
-  const expressApp = express();
-
-  const adapter = new ExpressAdapter(expressApp);
-  const app = await NestFactory.create<NestExpressApplication>(
-    AppModule,
-    adapter,
-  );
+async function bootstrap() {
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
   app.enableCors();
   app.setBaseViewsDir(join(__dirname, '..', 'views'));
   app.setViewEngine('hbs');
 
-  await app.init();
   return app;
-};
-
-async function bootstrap() {
-  const app = await NestFactory.create<NestExpressApplication>(AppModule);
-
-  app.setBaseViewsDir(join(__dirname, '..', 'views'));
-
-  app.setViewEngine('hbs');
-
-  await app.listen(3000);
 }
 
-if (process.env.NODE_ENV === 'local') {
-  bootstrap();
-} else {
-  module.exports = createServerlessApp;
+// TODO: 通过注入 NODE_ENV 为 local，来方便本地启动服务，进行开发调试
+const isLocal = process.env.NODE_ENV === 'local';
+if (isLocal) {
+  bootstrap().then(app => {
+    app.listen(3000, () => {
+      console.log(`Server start on http://localhost:3000`);
+    });
+  });
 }
+
+export { bootstrap };
