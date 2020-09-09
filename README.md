@@ -120,7 +120,7 @@ name: nestjsDemo # (必填) 组件实例名称.
 #组件参数
 inputs:
   src:
-    src: ./ # (optional) path to the source folder. default is a hello world app.
+    src: ./ # (可选) 代码路径
     exclude:
       - .env
   functionName: nestjsDemo
