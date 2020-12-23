@@ -12,7 +12,6 @@ inputs:
       - 'test/**'
   # functionConf:
   #   timeout: 10
-  #   memorySize: 128
   # apigatewayConf:
   #   protocols:
   #     - http
