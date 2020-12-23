@@ -1,5 +1,5 @@
 name: nestjs
-version: 0.1.0
+version: 0.2.0
 author: Tencent Cloud, Inc.
 org: Tencent Cloud, Inc.
 description: Deploy a serverless Nest.js application onto Tencent SCF and APIGateway.
