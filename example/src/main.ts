@@ -4,12 +4,20 @@ import { join } from 'path';
 import { AppModule } from './app.module';
 
 async function bootstrap() {
-  const app = await NestFactory.create<NestExpressApplication>(AppModule);
-  app.enableCors();
-  app.setBaseViewsDir(join(__dirname, '..', 'views'));
-  app.setViewEngine('hbs');
+  // 缓存 Nest.js 实例
+  if (!global.__NEST_APP__) {
+    console.log('Initializing Nest.js Application');
 
-  return app;
+    const app = await NestFactory.create<NestExpressApplication>(AppModule);
+    app.enableCors();
+    app.setBaseViewsDir(join(__dirname, '..', 'views'));
+    app.setViewEngine('hbs');
+
+    global.__NEST_APP__ = app;
+    return app;
+  } else {
+    return global.__NEST_APP__;
+  }
 }
 
 // TODO: 通过注入 NODE_ENV 为 local，来方便本地启动服务，进行开发调试
