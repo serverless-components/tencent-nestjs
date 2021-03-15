@@ -1,5 +1,4 @@
 app: appDemo
-org: orgDemo
 stage: dev
 component: nestjs
 name: nestjsDemo

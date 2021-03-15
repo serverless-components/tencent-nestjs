@@ -7,7 +7,6 @@ let app
 let server
 
 exports.handler = async (event, context) => {
-
   if (!app) {
     const nestApp = await getApp()
     await nestApp.init()
